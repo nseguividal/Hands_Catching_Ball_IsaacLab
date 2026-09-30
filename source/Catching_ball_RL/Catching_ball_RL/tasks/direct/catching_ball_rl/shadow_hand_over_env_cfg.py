@@ -12,7 +12,7 @@ from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.markers import VisualizationMarkersCfg
 from isaaclab.scene import InteractiveSceneCfg
-from isaaclab.sensors import ContactSensorCfg
+from isaaclab.sensors import ContactSensorCfg, TiledCameraCfg
 from isaaclab.sim import PhysxCfg, SimulationCfg
 from isaaclab.sim.spawners.materials.physics_materials_cfg import RigidBodyMaterialCfg
 from isaaclab.utils import configclass
@@ -170,8 +170,8 @@ class ShadowHandOverEnvCfg(DirectMARLEnvCfg):
     episode_length_s = 7.5
     possible_agents = ["right_hand", "left_hand"]
     action_spaces = {"right_hand": 20, "left_hand": 20}
-    observation_spaces = {"right_hand": 172, "left_hand": 172}  # 157 + 15 (5 fingertips * 3 force components)
-    state_space = 320  # 290 + 30 (both hands contact forces)
+    observation_spaces = {"right_hand": 212, "left_hand": 212}  # 133 proprio + 15 tactile + 64 depth grid (8x8)
+    state_space = 448  # 212 right + 212 left + 13 object + 11 goal (centralized privileged critic)
 
     # events
     events: EventCfg = EventCfg()
@@ -249,6 +249,42 @@ class ShadowHandOverEnvCfg(DirectMARLEnvCfg):
         history_length=1,
     )
 
+    # wrist cameras (RGB + Depth) - elevated palm-facing view (lowerarm mount)
+    right_wrist_camera_cfg: TiledCameraCfg = TiledCameraCfg(
+        prim_path="/World/envs/env_.*/RightRobot/robot0_palm/camera",
+        offset=TiledCameraCfg.OffsetCfg(
+            pos=(0.0, -0.20, -0.20),
+            rot=(0.9781, -0.2079, 0.0, 0.0),  # Tilted ~24 deg downward toward palm & fingers
+            convention="ros",
+        ),
+        data_types=["distance_to_image_plane"],
+        spawn=sim_utils.PinholeCameraCfg(
+            focal_length=18.0,
+            focus_distance=400.0,
+            horizontal_aperture=20.955,
+            clipping_range=(0.01, 10.0),
+        ),
+        width=64,
+        height=64,
+    )
+    left_wrist_camera_cfg: TiledCameraCfg = TiledCameraCfg(
+        prim_path="/World/envs/env_.*/LeftRobot/robot0_palm/camera",
+        offset=TiledCameraCfg.OffsetCfg(
+            pos=(0.0, -0.20, -0.20),
+            rot=(0.9781, -0.2079, 0.0, 0.0),  # Tilted ~24 deg downward toward palm & fingers
+            convention="ros",
+        ),
+        data_types=["distance_to_image_plane"],
+        spawn=sim_utils.PinholeCameraCfg(
+            focal_length=18.0,
+            focus_distance=400.0,
+            horizontal_aperture=20.955,
+            clipping_range=(0.01, 10.0),
+        ),
+        width=64,
+        height=64,
+    )
+
     # in-hand object
     object_cfg: RigidObjectCfg = RigidObjectCfg(
         prim_path="/World/envs/env_.*/object",
@@ -282,7 +318,7 @@ class ShadowHandOverEnvCfg(DirectMARLEnvCfg):
         },
     )
     # scene
-    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=2048, env_spacing=1.5, replicate_physics=True)
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=128, env_spacing=1.5, replicate_physics=True)
 
     # reset
     reset_position_noise = 0.01  # range of position at reset
@@ -292,6 +328,7 @@ class ShadowHandOverEnvCfg(DirectMARLEnvCfg):
     fall_dist = 0.24
     vel_obs_scale = 0.2
     force_obs_scale = 0.01
+    depth_obs_scale = 1.0
     act_moving_average = 1.0
     # reward-related scales
     dist_reward_scale = 20.0

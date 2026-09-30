@@ -10,12 +10,13 @@ from collections.abc import Sequence
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation, RigidObject
 from isaaclab.envs import DirectMARLEnv
 from isaaclab.markers import VisualizationMarkers
-from isaaclab.sensors import ContactSensor
+from isaaclab.sensors import ContactSensor, TiledCamera
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 from isaaclab.utils.math import quat_conjugate, quat_from_angle_axis, quat_mul, sample_uniform, saturate
 
@@ -105,6 +106,11 @@ class ShadowHandOverEnv(DirectMARLEnv):
         self.left_contact_sensor = ContactSensor(self.cfg.left_contact_sensor_cfg)
         self.scene.sensors["right_contact_sensor"] = self.right_contact_sensor
         self.scene.sensors["left_contact_sensor"] = self.left_contact_sensor
+        # add wrist cameras (RGB + Depth)
+        self.right_wrist_camera = TiledCamera(self.cfg.right_wrist_camera_cfg)
+        self.left_wrist_camera = TiledCamera(self.cfg.left_wrist_camera_cfg)
+        self.scene.sensors["right_wrist_camera"] = self.right_wrist_camera
+        self.scene.sensors["left_wrist_camera"] = self.left_wrist_camera
         # add lights
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
@@ -162,76 +168,56 @@ class ShadowHandOverEnv(DirectMARLEnv):
         )
 
     def _get_observations(self) -> dict[str, torch.Tensor]:
+        # Process wrist depth images: clean NaNs/inf, clamp to [0, 2] meters, and pool to 8x8 grid (64 features)
+        right_depth = self.right_wrist_depth
+        if right_depth.dim() == 3:
+            right_depth = right_depth.unsqueeze(-1)
+        right_depth = right_depth.permute(0, 3, 1, 2)  # shape: (N, C, H, W)
+        right_depth_clean = torch.nan_to_num(right_depth, nan=2.0, posinf=2.0, neginf=0.0).clamp(0.0, 2.0)
+        right_depth_feat = F.adaptive_avg_pool2d(right_depth_clean, (8, 8)).flatten(1) * self.cfg.depth_obs_scale
+
+        left_depth = self.left_wrist_depth
+        if left_depth.dim() == 3:
+            left_depth = left_depth.unsqueeze(-1)
+        left_depth = left_depth.permute(0, 3, 1, 2)  # shape: (N, C, H, W)
+        left_depth_clean = torch.nan_to_num(left_depth, nan=2.0, posinf=2.0, neginf=0.0).clamp(0.0, 2.0)
+        left_depth_feat = F.adaptive_avg_pool2d(left_depth_clean, (8, 8)).flatten(1) * self.cfg.depth_obs_scale
+
+        # Realistic Actor Observations (212 dims each):
+        # 133 proprioception + 15 tactile forces + 64 depth vision grid
+        # ZERO privileged ground-truth ball or goal states in policy observation!
         observations = {
             "right_hand": torch.cat(
                 (
-                    # ---- right hand ----
-                    # DOF positions (24)
+                    # ---- proprioception (113) ----
                     unscale(self.right_hand_dof_pos, self.hand_dof_lower_limits, self.hand_dof_upper_limits),
-                    # DOF velocities (24)
                     self.cfg.vel_obs_scale * self.right_hand_dof_vel,
-                    # fingertip positions (5 * 3)
                     self.right_fingertip_pos.view(self.num_envs, self.num_fingertips * 3),
-                    # fingertip rotations (5 * 4)
                     self.right_fingertip_rot.view(self.num_envs, self.num_fingertips * 4),
-                    # fingertip linear and angular velocities (5 * 6)
                     self.right_fingertip_velocities.view(self.num_envs, self.num_fingertips * 6),
-                    # fingertip contact forces with ball (5 * 3 = 15)
+                    # ---- tactile force sensing (15) ----
                     self.cfg.force_obs_scale * self.right_fingertip_forces.view(self.num_envs, self.num_fingertips * 3),
-                    # applied actions (20)
+                    # ---- applied actions (20) ----
                     self.actions["right_hand"],
-                    # ---- object ----
-                    # positions (3)
-                    self.object_pos,
-                    # rotations (4)
-                    self.object_rot,
-                    # linear velocities (3)
-                    self.object_linvel,
-                    # angular velocities (3)
-                    self.cfg.vel_obs_scale * self.object_angvel,
-                    # ---- goal ----
-                    # positions (3)
-                    self.goal_pos,
-                    # rotations (4)
-                    self.goal_rot,
-                    # goal-object rotation diff (4)
-                    quat_mul(self.object_rot, quat_conjugate(self.goal_rot)),
+                    # ---- wrist depth vision (64) ----
+                    right_depth_feat,
                 ),
                 dim=-1,
             ),
             "left_hand": torch.cat(
                 (
-                    # ---- left hand ----
-                    # DOF positions (24)
+                    # ---- proprioception (113) ----
                     unscale(self.left_hand_dof_pos, self.hand_dof_lower_limits, self.hand_dof_upper_limits),
-                    # DOF velocities (24)
                     self.cfg.vel_obs_scale * self.left_hand_dof_vel,
-                    # fingertip positions (5 * 3)
                     self.left_fingertip_pos.view(self.num_envs, self.num_fingertips * 3),
-                    # fingertip rotations (5 * 4)
                     self.left_fingertip_rot.view(self.num_envs, self.num_fingertips * 4),
-                    # fingertip linear and angular velocities (5 * 6)
                     self.left_fingertip_velocities.view(self.num_envs, self.num_fingertips * 6),
-                    # fingertip contact forces with ball (5 * 3 = 15)
+                    # ---- tactile force sensing (15) ----
                     self.cfg.force_obs_scale * self.left_fingertip_forces.view(self.num_envs, self.num_fingertips * 3),
-                    # applied actions (20)
+                    # ---- applied actions (20) ----
                     self.actions["left_hand"],
-                    # ---- object ----
-                    # positions (3)
-                    self.object_pos,
-                    # rotations (4)
-                    self.object_rot,
-                    # linear velocities (3)
-                    self.object_linvel,
-                    # angular velocities (3)
-                    self.cfg.vel_obs_scale * self.object_angvel,
-                    # ---- goal ----
-                    # positions (3)
-                    self.goal_pos,
-                    # rotations (4)
-                    self.goal_rot,
-                    # goal-object rotation diff (4)
-                    quat_mul(self.object_rot, quat_conjugate(self.goal_rot)),
+                    # ---- wrist depth vision (64) ----
+                    left_depth_feat,
                 ),
                 dim=-1,
             ),
@@ -239,53 +225,23 @@ class ShadowHandOverEnv(DirectMARLEnv):
         return observations
 
     def _get_states(self) -> torch.Tensor:
+        # Centralized Privileged Critic State (448 dims):
+        # Full realistic observations for both hands (212 * 2) + ground-truth Ball & Goal states (24)
+        obs_dict = self._get_observations()
         states = torch.cat(
             (
-                # ---- right hand ----
-                # DOF positions (24)
-                unscale(self.right_hand_dof_pos, self.hand_dof_lower_limits, self.hand_dof_upper_limits),
-                # DOF velocities (24)
-                self.cfg.vel_obs_scale * self.right_hand_dof_vel,
-                # fingertip positions (5 * 3)
-                self.right_fingertip_pos.view(self.num_envs, self.num_fingertips * 3),
-                # fingertip rotations (5 * 4)
-                self.right_fingertip_rot.view(self.num_envs, self.num_fingertips * 4),
-                # fingertip linear and angular velocities (5 * 6)
-                self.right_fingertip_velocities.view(self.num_envs, self.num_fingertips * 6),
-                # fingertip contact forces with ball (5 * 3 = 15)
-                self.cfg.force_obs_scale * self.right_fingertip_forces.view(self.num_envs, self.num_fingertips * 3),
-                # applied actions (20)
-                self.actions["right_hand"],
-                # ---- left hand ----
-                # DOF positions (24)
-                unscale(self.left_hand_dof_pos, self.hand_dof_lower_limits, self.hand_dof_upper_limits),
-                # DOF velocities (24)
-                self.cfg.vel_obs_scale * self.left_hand_dof_vel,
-                # fingertip positions (5 * 3)
-                self.left_fingertip_pos.view(self.num_envs, self.num_fingertips * 3),
-                # fingertip rotations (5 * 4)
-                self.left_fingertip_rot.view(self.num_envs, self.num_fingertips * 4),
-                # fingertip linear and angular velocities (5 * 6)
-                self.left_fingertip_velocities.view(self.num_envs, self.num_fingertips * 6),
-                # fingertip contact forces with ball (5 * 3 = 15)
-                self.cfg.force_obs_scale * self.left_fingertip_forces.view(self.num_envs, self.num_fingertips * 3),
-                # applied actions (20)
-                self.actions["left_hand"],
-                # ---- object ----
-                # positions (3)
+                # right hand actor observations (212)
+                obs_dict["right_hand"],
+                # left hand actor observations (212)
+                obs_dict["left_hand"],
+                # privileged ground-truth object state (13)
                 self.object_pos,
-                # rotations (4)
                 self.object_rot,
-                # linear velocities (3)
                 self.object_linvel,
-                # angular velocities (3)
                 self.cfg.vel_obs_scale * self.object_angvel,
-                # ---- goal ----
-                # positions (3)
+                # privileged ground-truth goal state (11)
                 self.goal_pos,
-                # rotations (4)
                 self.goal_rot,
-                # goal-object rotation diff (4)
                 quat_mul(self.object_rot, quat_conjugate(self.goal_rot)),
             ),
             dim=-1,
@@ -452,6 +408,10 @@ class ShadowHandOverEnv(DirectMARLEnv):
         # contact forces on fingertips from ball
         self.right_fingertip_forces = self.right_contact_sensor.data.net_forces_w
         self.left_fingertip_forces = self.left_contact_sensor.data.net_forces_w
+
+        # camera outputs (Depth only) from wrist cameras
+        self.right_wrist_depth = self.right_wrist_camera.data.output["distance_to_image_plane"]
+        self.left_wrist_depth = self.left_wrist_camera.data.output["distance_to_image_plane"]
 
 
 @torch.jit.script
