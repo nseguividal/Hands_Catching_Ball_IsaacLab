@@ -84,6 +84,9 @@ class ShadowHandOverEnv(DirectMARLEnv):
         self.y_unit_tensor = torch.tensor([0, 1, 0], dtype=torch.float, device=self.device).repeat((self.num_envs, 1))
         self.z_unit_tensor = torch.tensor([0, 0, 1], dtype=torch.float, device=self.device).repeat((self.num_envs, 1))
 
+        # step counter for training logs
+        self.step_counter = 0
+
     def _setup_scene(self):
         # add hand, in-hand object, and goal object
         self.right_hand = Articulation(self.cfg.right_robot_cfg)
@@ -302,6 +305,21 @@ class ShadowHandOverEnv(DirectMARLEnv):
         rew_catch = self.cfg.contact_reward_scale * num_left_contacts * near_goal
 
         total_reward = rew_dist + rew_catch
+
+        # periodic terminal progress log (every 100 steps)
+        self.step_counter += 1
+        if self.step_counter % 100 == 0:
+            mean_dist = goal_dist.mean().item()
+            min_dist = goal_dist.min().item()
+            mean_rew = total_reward.mean().item()
+            mean_contacts = num_left_contacts.mean().item()
+            print(
+                f"[TRAIN PROGRESS | Step {self.step_counter:6d}] "
+                f"Mean Goal Dist: {mean_dist:.4f} m | "
+                f"Best Env Dist: {min_dist:.4f} m | "
+                f"Catch Contacts: {mean_contacts:.2f}/5 | "
+                f"Mean Reward: {mean_rew:.3f}"
+            )
 
         # log reward components
         if "log" not in self.extras:
