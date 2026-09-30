@@ -15,6 +15,7 @@ import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation, RigidObject
 from isaaclab.envs import DirectMARLEnv
 from isaaclab.markers import VisualizationMarkers
+from isaaclab.sensors import ContactSensor
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 from isaaclab.utils.math import quat_conjugate, quat_from_angle_axis, quat_mul, sample_uniform, saturate
 
@@ -96,6 +97,11 @@ class ShadowHandOverEnv(DirectMARLEnv):
         self.scene.articulations["right_hand"] = self.right_hand
         self.scene.articulations["left_hand"] = self.left_hand
         self.scene.rigid_objects["object"] = self.object
+        # add contact sensors
+        self.right_contact_sensor = ContactSensor(self.cfg.right_contact_sensor_cfg)
+        self.left_contact_sensor = ContactSensor(self.cfg.left_contact_sensor_cfg)
+        self.scene.sensors["right_contact_sensor"] = self.right_contact_sensor
+        self.scene.sensors["left_contact_sensor"] = self.left_contact_sensor
         # add lights
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
@@ -167,6 +173,8 @@ class ShadowHandOverEnv(DirectMARLEnv):
                     self.right_fingertip_rot.view(self.num_envs, self.num_fingertips * 4),
                     # fingertip linear and angular velocities (5 * 6)
                     self.right_fingertip_velocities.view(self.num_envs, self.num_fingertips * 6),
+                    # fingertip contact forces with ball (5 * 3 = 15)
+                    self.cfg.force_obs_scale * self.right_fingertip_forces.view(self.num_envs, self.num_fingertips * 3),
                     # applied actions (20)
                     self.actions["right_hand"],
                     # ---- object ----
@@ -201,6 +209,8 @@ class ShadowHandOverEnv(DirectMARLEnv):
                     self.left_fingertip_rot.view(self.num_envs, self.num_fingertips * 4),
                     # fingertip linear and angular velocities (5 * 6)
                     self.left_fingertip_velocities.view(self.num_envs, self.num_fingertips * 6),
+                    # fingertip contact forces with ball (5 * 3 = 15)
+                    self.cfg.force_obs_scale * self.left_fingertip_forces.view(self.num_envs, self.num_fingertips * 3),
                     # applied actions (20)
                     self.actions["left_hand"],
                     # ---- object ----
@@ -239,6 +249,8 @@ class ShadowHandOverEnv(DirectMARLEnv):
                 self.right_fingertip_rot.view(self.num_envs, self.num_fingertips * 4),
                 # fingertip linear and angular velocities (5 * 6)
                 self.right_fingertip_velocities.view(self.num_envs, self.num_fingertips * 6),
+                # fingertip contact forces with ball (5 * 3 = 15)
+                self.cfg.force_obs_scale * self.right_fingertip_forces.view(self.num_envs, self.num_fingertips * 3),
                 # applied actions (20)
                 self.actions["right_hand"],
                 # ---- left hand ----
@@ -252,6 +264,8 @@ class ShadowHandOverEnv(DirectMARLEnv):
                 self.left_fingertip_rot.view(self.num_envs, self.num_fingertips * 4),
                 # fingertip linear and angular velocities (5 * 6)
                 self.left_fingertip_velocities.view(self.num_envs, self.num_fingertips * 6),
+                # fingertip contact forces with ball (5 * 3 = 15)
+                self.cfg.force_obs_scale * self.left_fingertip_forces.view(self.num_envs, self.num_fingertips * 3),
                 # applied actions (20)
                 self.actions["left_hand"],
                 # ---- object ----
@@ -276,17 +290,28 @@ class ShadowHandOverEnv(DirectMARLEnv):
         return states
 
     def _get_rewards(self) -> dict[str, torch.Tensor]:
-        # compute reward
+        # compute distance reward
         goal_dist = torch.norm(self.object_pos - self.goal_pos, p=2, dim=-1)
         rew_dist = 2 * torch.exp(-self.cfg.dist_reward_scale * goal_dist)
+
+        # tactile catching reward: bonus when left hand fingertips make active contact with ball near target
+        left_force_mag = torch.norm(self.left_fingertip_forces, dim=-1)  # (num_envs, 5)
+        left_in_contact = (left_force_mag > 0.5).float()  # contact threshold > 0.5 N
+        num_left_contacts = torch.sum(left_in_contact, dim=-1)
+        near_goal = (goal_dist < 0.15).float()
+        rew_catch = self.cfg.contact_reward_scale * num_left_contacts * near_goal
+
+        total_reward = rew_dist + rew_catch
 
         # log reward components
         if "log" not in self.extras:
             self.extras["log"] = dict()
         self.extras["log"]["dist_reward"] = rew_dist.mean()
         self.extras["log"]["dist_goal"] = goal_dist.mean()
+        self.extras["log"]["rew_catch"] = rew_catch.mean()
+        self.extras["log"]["num_contacts"] = num_left_contacts.mean()
 
-        return {"right_hand": rew_dist, "left_hand": rew_dist}
+        return {"right_hand": total_reward, "left_hand": total_reward}
 
     def _get_dones(self) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
         self._compute_intermediate_values()
@@ -405,6 +430,10 @@ class ShadowHandOverEnv(DirectMARLEnv):
         self.object_velocities = self.object.data.root_vel_w
         self.object_linvel = self.object.data.root_lin_vel_w
         self.object_angvel = self.object.data.root_ang_vel_w
+
+        # contact forces on fingertips from ball
+        self.right_fingertip_forces = self.right_contact_sensor.data.net_forces_w
+        self.left_fingertip_forces = self.left_contact_sensor.data.net_forces_w
 
 
 @torch.jit.script

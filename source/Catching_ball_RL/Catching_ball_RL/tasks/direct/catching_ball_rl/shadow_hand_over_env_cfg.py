@@ -12,6 +12,7 @@ from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.markers import VisualizationMarkersCfg
 from isaaclab.scene import InteractiveSceneCfg
+from isaaclab.sensors import ContactSensorCfg
 from isaaclab.sim import PhysxCfg, SimulationCfg
 from isaaclab.sim.spawners.materials.physics_materials_cfg import RigidBodyMaterialCfg
 from isaaclab.utils import configclass
@@ -169,8 +170,8 @@ class ShadowHandOverEnvCfg(DirectMARLEnvCfg):
     episode_length_s = 7.5
     possible_agents = ["right_hand", "left_hand"]
     action_spaces = {"right_hand": 20, "left_hand": 20}
-    observation_spaces = {"right_hand": 157, "left_hand": 157}
-    state_space = 290
+    observation_spaces = {"right_hand": 172, "left_hand": 172}  # 157 + 15 (5 fingertips * 3 force components)
+    state_space = 320  # 290 + 30 (both hands contact forces)
 
     # events
     events: EventCfg = EventCfg()
@@ -188,19 +189,23 @@ class ShadowHandOverEnvCfg(DirectMARLEnvCfg):
         ),
     )
     # robot
-    right_robot_cfg: ArticulationCfg = SHADOW_HAND_CFG.replace(prim_path="/World/envs/env_.*/RightRobot").replace(
+    right_robot_cfg: ArticulationCfg = SHADOW_HAND_CFG.replace(
+        prim_path="/World/envs/env_.*/RightRobot",
+        spawn=SHADOW_HAND_CFG.spawn.replace(activate_contact_sensors=True),
         init_state=ArticulationCfg.InitialStateCfg(
             pos=(0.0, 0.0, 0.5),
             rot=(1.0, 0.0, 0.0, 0.0),
             joint_pos={".*": 0.0},
-        )
+        ),
     )
-    left_robot_cfg: ArticulationCfg = SHADOW_HAND_CFG.replace(prim_path="/World/envs/env_.*/LeftRobot").replace(
+    left_robot_cfg: ArticulationCfg = SHADOW_HAND_CFG.replace(
+        prim_path="/World/envs/env_.*/LeftRobot",
+        spawn=SHADOW_HAND_CFG.spawn.replace(activate_contact_sensors=True),
         init_state=ArticulationCfg.InitialStateCfg(
             pos=(0.0, -1.0, 0.5),
             rot=(0.0, 0.0, 0.0, 1.0),
             joint_pos={".*": 0.0},
-        )
+        ),
     )
     actuated_joint_names = [
         "robot0_WRJ1",
@@ -231,6 +236,18 @@ class ShadowHandOverEnvCfg(DirectMARLEnvCfg):
         "robot0_lfdistal",
         "robot0_thdistal",
     ]
+
+    # contact sensors (detect contact forces on fingertips)
+    right_contact_sensor_cfg: ContactSensorCfg = ContactSensorCfg(
+        prim_path="/World/envs/env_.*/RightRobot/robot0_.*distal",
+        update_period=0.0,
+        history_length=1,
+    )
+    left_contact_sensor_cfg: ContactSensorCfg = ContactSensorCfg(
+        prim_path="/World/envs/env_.*/LeftRobot/robot0_.*distal",
+        update_period=0.0,
+        history_length=1,
+    )
 
     # in-hand object
     object_cfg: RigidObjectCfg = RigidObjectCfg(
@@ -274,6 +291,8 @@ class ShadowHandOverEnvCfg(DirectMARLEnvCfg):
     # scales and constants
     fall_dist = 0.24
     vel_obs_scale = 0.2
+    force_obs_scale = 0.01
     act_moving_average = 1.0
     # reward-related scales
     dist_reward_scale = 20.0
+    contact_reward_scale = 1.0
