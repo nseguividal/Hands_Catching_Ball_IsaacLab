@@ -1,9 +1,3 @@
-# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
-# All rights reserved.
-#
-# SPDX-License-Identifier: BSD-3-Clause
-
-
 from __future__ import annotations
 
 from collections.abc import Sequence
@@ -76,7 +70,7 @@ class ShadowHandOverEnv(DirectMARLEnv):
         self.goal_rot = torch.zeros((self.num_envs, 4), dtype=torch.float, device=self.device)
         self.goal_rot[:, 0] = 1.0
         self.goal_pos = torch.zeros((self.num_envs, 3), dtype=torch.float, device=self.device)
-        self.goal_pos[:, :] = torch.tensor([0.0, -0.64, 0.54], device=self.device)
+        self.goal_pos[:, :] = torch.tensor([0.0, -0.61, 0.55], device=self.device)
         # initialize goal marker
         self.goal_markers = VisualizationMarkers(self.cfg.goal_object_cfg)
 
@@ -106,11 +100,13 @@ class ShadowHandOverEnv(DirectMARLEnv):
         self.left_contact_sensor = ContactSensor(self.cfg.left_contact_sensor_cfg)
         self.scene.sensors["right_contact_sensor"] = self.right_contact_sensor
         self.scene.sensors["left_contact_sensor"] = self.left_contact_sensor
-        # add wrist cameras (RGB + Depth)
+        # add wrist cameras and overhead humanoid head camera (Depth)
         self.right_wrist_camera = TiledCamera(self.cfg.right_wrist_camera_cfg)
         self.left_wrist_camera = TiledCamera(self.cfg.left_wrist_camera_cfg)
+        self.head_camera = TiledCamera(self.cfg.head_camera_cfg)
         self.scene.sensors["right_wrist_camera"] = self.right_wrist_camera
         self.scene.sensors["left_wrist_camera"] = self.left_wrist_camera
+        self.scene.sensors["head_camera"] = self.head_camera
         # add lights
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
@@ -168,7 +164,7 @@ class ShadowHandOverEnv(DirectMARLEnv):
         )
 
     def _get_observations(self) -> dict[str, torch.Tensor]:
-        # Process wrist depth images: clean NaNs/inf, clamp to [0, 2] meters, and pool to 8x8 grid (64 features)
+        # Process wrist and overhead humanoid head depth images: clean NaNs/inf, clamp to [0, 2] meters, pool to 8x8 grid
         right_depth = self.right_wrist_depth
         if right_depth.dim() == 3:
             right_depth = right_depth.unsqueeze(-1)
@@ -183,8 +179,15 @@ class ShadowHandOverEnv(DirectMARLEnv):
         left_depth_clean = torch.nan_to_num(left_depth, nan=2.0, posinf=2.0, neginf=0.0).clamp(0.0, 2.0)
         left_depth_feat = F.adaptive_avg_pool2d(left_depth_clean, (8, 8)).flatten(1) * self.cfg.depth_obs_scale
 
-        # Realistic Actor Observations (212 dims each):
-        # 133 proprioception + 15 tactile forces + 64 depth vision grid
+        head_depth = self.head_depth
+        if head_depth.dim() == 3:
+            head_depth = head_depth.unsqueeze(-1)
+        head_depth = head_depth.permute(0, 3, 1, 2)  # shape: (N, C, H, W)
+        head_depth_clean = torch.nan_to_num(head_depth, nan=2.0, posinf=2.0, neginf=0.0).clamp(0.0, 2.0)
+        head_depth_feat = F.adaptive_avg_pool2d(head_depth_clean, (8, 8)).flatten(1) * self.cfg.depth_obs_scale
+
+        # Realistic Actor Observations (276 dims each):
+        # 133 proprioception + 15 tactile forces + 64 wrist depth grid + 64 overhead head depth grid
         # ZERO privileged ground-truth ball or goal states in policy observation!
         observations = {
             "right_hand": torch.cat(
@@ -201,6 +204,8 @@ class ShadowHandOverEnv(DirectMARLEnv):
                     self.actions["right_hand"],
                     # ---- wrist depth vision (64) ----
                     right_depth_feat,
+                    # ---- overhead humanoid head depth vision (64) ----
+                    head_depth_feat,
                 ),
                 dim=-1,
             ),
@@ -218,6 +223,8 @@ class ShadowHandOverEnv(DirectMARLEnv):
                     self.actions["left_hand"],
                     # ---- wrist depth vision (64) ----
                     left_depth_feat,
+                    # ---- overhead humanoid head depth vision (64) ----
+                    head_depth_feat,
                 ),
                 dim=-1,
             ),
@@ -225,14 +232,14 @@ class ShadowHandOverEnv(DirectMARLEnv):
         return observations
 
     def _get_states(self) -> torch.Tensor:
-        # Centralized Privileged Critic State (448 dims):
-        # Full realistic observations for both hands (212 * 2) + ground-truth Ball & Goal states (24)
+        # Centralized Privileged Critic State (576 dims):
+        # Full realistic observations for both hands (276 * 2) + ground-truth Ball & Goal states (24)
         obs_dict = self._get_observations()
         states = torch.cat(
             (
-                # right hand actor observations (212)
+                # right hand actor observations (276)
                 obs_dict["right_hand"],
-                # left hand actor observations (212)
+                # left hand actor observations (276)
                 obs_dict["left_hand"],
                 # privileged ground-truth object state (13)
                 self.object_pos,
@@ -249,18 +256,31 @@ class ShadowHandOverEnv(DirectMARLEnv):
         return states
 
     def _get_rewards(self) -> dict[str, torch.Tensor]:
-        # compute distance reward
+        # 1. Goal distance reward
         goal_dist = torch.norm(self.object_pos - self.goal_pos, p=2, dim=-1)
         rew_dist = 2 * torch.exp(-self.cfg.dist_reward_scale * goal_dist)
 
-        # tactile catching reward: bonus when left hand fingertips make active contact with ball near target
+        # 2. Dynamic throwing reward (upward arc + forward velocity towards left hand along -Y)
+        forward_flight_vel = torch.clamp(-self.object_linvel[:, 1], min=0.0, max=2.5)  # Forward speed towards Left Robot (-Y)
+        upward_flight_height = torch.clamp(self.object_pos[:, 2] - 0.50, min=0.0, max=0.25)  # Arc height above initial table plane
+        in_throw_window = (self.episode_length_buf < 90).float()  # First 1.5 seconds of episode
+        rew_throw = self.cfg.throw_reward_scale * forward_flight_vel * upward_flight_height * in_throw_window
+
+        # 3. Anti-curling penalty: left hand must keep fingers open & extended while awaiting incoming ball
+        left_finger_pos = self.left_hand_dof_pos[:, self.actuated_dof_indices[2:]]  # 18 finger joints
+        finger_curl = torch.clamp(left_finger_pos - 0.2, min=0.0)  # Positive flexion beyond 0.2 rad
+        mean_curl = torch.mean(finger_curl, dim=-1)
+        awaiting_ball = (goal_dist > 0.18).float()  # Only penalized when ball is still far
+        rew_open_hand = -self.cfg.curl_penalty_scale * mean_curl * awaiting_ball
+
+        # 4. Tactile catching reward: bonus when left hand fingertips make active contact with ball near target
         left_force_mag = torch.norm(self.left_fingertip_forces, dim=-1)  # (num_envs, 5)
-        left_in_contact = (left_force_mag > 0.5).float()  # contact threshold > 0.5 N
+        left_in_contact = (left_force_mag > 0.5).float()  # Contact threshold > 0.5 N
         num_left_contacts = torch.sum(left_in_contact, dim=-1)
-        near_goal = (goal_dist < 0.15).float()
+        near_goal = (goal_dist < 0.12).float()  # Strict proximity to prevent palm self-collision cheat
         rew_catch = self.cfg.contact_reward_scale * num_left_contacts * near_goal
 
-        total_reward = rew_dist + rew_catch
+        total_reward = rew_dist + rew_throw + rew_open_hand + rew_catch
 
         # periodic terminal progress log (every 100 steps)
         self.step_counter += 1
@@ -282,6 +302,8 @@ class ShadowHandOverEnv(DirectMARLEnv):
             self.extras["log"] = dict()
         self.extras["log"]["dist_reward"] = rew_dist.mean()
         self.extras["log"]["dist_goal"] = goal_dist.mean()
+        self.extras["log"]["rew_throw"] = rew_throw.mean()
+        self.extras["log"]["rew_open_hand"] = rew_open_hand.mean()
         self.extras["log"]["rew_catch"] = rew_catch.mean()
         self.extras["log"]["num_contacts"] = num_left_contacts.mean()
 
@@ -409,9 +431,10 @@ class ShadowHandOverEnv(DirectMARLEnv):
         self.right_fingertip_forces = self.right_contact_sensor.data.net_forces_w
         self.left_fingertip_forces = self.left_contact_sensor.data.net_forces_w
 
-        # camera outputs (Depth only) from wrist cameras
+        # camera outputs (Depth only) from wrist cameras and overhead humanoid head camera
         self.right_wrist_depth = self.right_wrist_camera.data.output["distance_to_image_plane"]
         self.left_wrist_depth = self.left_wrist_camera.data.output["distance_to_image_plane"]
+        self.head_depth = self.head_camera.data.output["distance_to_image_plane"]
 
 
 @torch.jit.script

@@ -2,7 +2,7 @@
 
 Branch: `feature/camera-and-force`
 
-Two robotic Shadow Hands learn to dynamically throw and catch a ball across a 1.0m gap using **Wrist Depth Cameras** + **Tactile Fingertip Sensors** (Option 1: Full Asymmetric Sim-to-Real).
+Two robotic Shadow Hands learn to dynamically throw and catch a ball across a 1.0m gap using **Wrist Depth Cameras** + **Overhead Humanoid Head Camera** + **Tactile Fingertip Sensors** (Option 1: Full Asymmetric Sim-to-Real).
 
 ---
 
@@ -20,10 +20,10 @@ python scripts/random_agent.py --task=Template-Catching-Ball-Rl-Direct-v0 --num_
 ---
 
 ### 2. Train the Model
-Train the policy across 128 parallel environments (headless mode for fast GPU training):
+Train the policy across 256 parallel environments (headless mode for fast GPU training):
 
 ```bash
-python scripts/rl_games/train.py --task=Template-Catching-Ball-Rl-Direct-v0 --num_envs=128 --enable_cameras --headless
+python scripts/rl_games/train.py --task=Template-Catching-Ball-Rl-Direct-v0 --num_envs=256 --enable_cameras --headless
 ```
 
 * Checkpoints are automatically saved to `logs/rl_games/shadow_hand_over_sim2real/<date_time>/nn/`.

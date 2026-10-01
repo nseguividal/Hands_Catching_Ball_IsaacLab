@@ -170,8 +170,8 @@ class ShadowHandOverEnvCfg(DirectMARLEnvCfg):
     episode_length_s = 7.5
     possible_agents = ["right_hand", "left_hand"]
     action_spaces = {"right_hand": 20, "left_hand": 20}
-    observation_spaces = {"right_hand": 212, "left_hand": 212}  # 133 proprio + 15 tactile + 64 depth grid (8x8)
-    state_space = 448  # 212 right + 212 left + 13 object + 11 goal (centralized privileged critic)
+    observation_spaces = {"right_hand": 276, "left_hand": 276}  # 133 proprio + 15 tactile + 64 wrist depth + 64 head depth
+    state_space = 576  # 276 right + 276 left + 13 object + 11 goal (centralized privileged critic)
 
     # events
     events: EventCfg = EventCfg()
@@ -285,6 +285,25 @@ class ShadowHandOverEnvCfg(DirectMARLEnvCfg):
         height=64,
     )
 
+    # overhead / humanoid head camera (Depth) - overview of entire 1.0m throw & catch arena
+    head_camera_cfg: TiledCameraCfg = TiledCameraCfg(
+        prim_path="/World/envs/env_.*/head_camera",
+        offset=TiledCameraCfg.OffsetCfg(
+            pos=(0.35, -0.50, 1.20),
+            rot=(-0.1729, 0.6857, 0.6857, -0.1729),  # Steep ~62 deg top-down view facing (0, -0.5, 0.55)
+            convention="ros",
+        ),
+        data_types=["distance_to_image_plane"],
+        spawn=sim_utils.PinholeCameraCfg(
+            focal_length=12.0,
+            focus_distance=400.0,
+            horizontal_aperture=20.955,
+            clipping_range=(0.01, 10.0),
+        ),
+        width=64,
+        height=64,
+    )
+
     # in-hand object
     object_cfg: RigidObjectCfg = RigidObjectCfg(
         prim_path="/World/envs/env_.*/object",
@@ -318,7 +337,7 @@ class ShadowHandOverEnvCfg(DirectMARLEnvCfg):
         },
     )
     # scene
-    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=128, env_spacing=1.5, replicate_physics=True)
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=256, env_spacing=1.5, replicate_physics=True)
 
     # reset
     reset_position_noise = 0.01  # range of position at reset
@@ -333,3 +352,5 @@ class ShadowHandOverEnvCfg(DirectMARLEnvCfg):
     # reward-related scales
     dist_reward_scale = 20.0
     contact_reward_scale = 1.0
+    throw_reward_scale = 2.0
+    curl_penalty_scale = 0.5
