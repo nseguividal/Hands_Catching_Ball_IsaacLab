@@ -133,7 +133,7 @@ class EventCfg:
             "asset_cfg": SceneEntityCfg("object"),
             "static_friction_range": (0.7, 1.3),
             "dynamic_friction_range": (1.0, 1.0),
-            "restitution_range": (1.0, 1.0),
+            "restitution_range": (0.6, 0.7),
             "num_buckets": 250,
         },
     )
@@ -202,7 +202,7 @@ class ShadowHandOverEnvCfg(DirectMARLEnvCfg):
         prim_path="/World/envs/env_.*/LeftRobot",
         spawn=SHADOW_HAND_CFG.spawn.replace(activate_contact_sensors=True),
         init_state=ArticulationCfg.InitialStateCfg(
-            pos=(0.0, -1.0, 0.5),
+            pos=(0.0, -1.05, 0.5),
             rot=(0.0, 0.0, 0.0, 1.0),
             joint_pos={".*": 0.0},
         ),
@@ -237,14 +237,16 @@ class ShadowHandOverEnvCfg(DirectMARLEnvCfg):
         "robot0_thdistal",
     ]
 
-    # contact sensors (detect contact forces on fingertips)
+    # contact sensors (detect contact forces on fingertips ONLY when contacting the ball)
     right_contact_sensor_cfg: ContactSensorCfg = ContactSensorCfg(
         prim_path="/World/envs/env_.*/RightRobot/robot0_.*distal",
+        filter_prim_paths_expr=["/World/envs/env_.*/object"],
         update_period=0.0,
         history_length=1,
     )
     left_contact_sensor_cfg: ContactSensorCfg = ContactSensorCfg(
         prim_path="/World/envs/env_.*/LeftRobot/robot0_.*distal",
+        filter_prim_paths_expr=["/World/envs/env_.*/object"],
         update_period=0.0,
         history_length=1,
     )
@@ -289,7 +291,7 @@ class ShadowHandOverEnvCfg(DirectMARLEnvCfg):
     head_camera_cfg: TiledCameraCfg = TiledCameraCfg(
         prim_path="/World/envs/env_.*/head_camera",
         offset=TiledCameraCfg.OffsetCfg(
-            pos=(0.35, -0.50, 1.20),
+            pos=(0.35, -0.525, 1.20),
             rot=(-0.1729, 0.6857, 0.6857, -0.1729),  # Steep ~62 deg top-down view facing (0, -0.5, 0.55)
             convention="ros",
         ),
@@ -319,7 +321,7 @@ class ShadowHandOverEnvCfg(DirectMARLEnvCfg):
                 solver_velocity_iteration_count=0,
                 sleep_threshold=0.005,
                 stabilization_threshold=0.0025,
-                max_depenetration_velocity=1000.0,
+                max_depenetration_velocity=15.0,
             ),
             collision_props=sim_utils.CollisionPropertiesCfg(),
             mass_props=sim_utils.MassPropertiesCfg(density=500.0),
@@ -351,6 +353,6 @@ class ShadowHandOverEnvCfg(DirectMARLEnvCfg):
     act_moving_average = 1.0
     # reward-related scales
     dist_reward_scale = 20.0
-    contact_reward_scale = 1.0
+    contact_reward_scale = 0.4  # 5 fingertips * 0.4 = 2.0 max bonus (balanced 50/50 with dist_reward)
     throw_reward_scale = 2.0
     curl_penalty_scale = 0.5

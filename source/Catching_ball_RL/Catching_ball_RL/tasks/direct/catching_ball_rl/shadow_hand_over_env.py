@@ -58,6 +58,10 @@ class ShadowHandOverEnv(DirectMARLEnv):
         self.finger_bodies.sort()
         self.num_fingertips = len(self.finger_bodies)
 
+        # main knuckle flexion DOFs for each of the 5 fingers [FF, MF, RF, LF, TH]
+        flexion_joint_names = ["robot0_FFJ2", "robot0_MFJ2", "robot0_RFJ2", "robot0_LFJ3", "robot0_THJ2"]
+        self.finger_flexion_dof_indices = [self.right_hand.joint_names.index(j) for j in flexion_joint_names]
+
         # joint limits
         joint_pos_limits = self.right_hand.root_physx_view.get_dof_limits().to(self.device)
         self.hand_dof_lower_limits = joint_pos_limits[..., 0]
@@ -70,7 +74,7 @@ class ShadowHandOverEnv(DirectMARLEnv):
         self.goal_rot = torch.zeros((self.num_envs, 4), dtype=torch.float, device=self.device)
         self.goal_rot[:, 0] = 1.0
         self.goal_pos = torch.zeros((self.num_envs, 3), dtype=torch.float, device=self.device)
-        self.goal_pos[:, :] = torch.tensor([0.0, -0.61, 0.55], device=self.device)
+        self.goal_pos[:, :] = torch.tensor([0.0, -0.66, 0.55], device=self.device)
         # initialize goal marker
         self.goal_markers = VisualizationMarkers(self.cfg.goal_object_cfg)
 
@@ -260,27 +264,29 @@ class ShadowHandOverEnv(DirectMARLEnv):
         goal_dist = torch.norm(self.object_pos - self.goal_pos, p=2, dim=-1)
         rew_dist = 2 * torch.exp(-self.cfg.dist_reward_scale * goal_dist)
 
-        # 2. Dynamic throwing reward (upward arc + forward velocity towards left hand along -Y)
-        forward_flight_vel = torch.clamp(-self.object_linvel[:, 1], min=0.0, max=2.5)  # Forward speed towards Left Robot (-Y)
-        upward_flight_height = torch.clamp(self.object_pos[:, 2] - 0.50, min=0.0, max=0.25)  # Arc height above initial table plane
-        in_throw_window = (self.episode_length_buf < 90).float()  # First 1.5 seconds of episode
-        rew_throw = self.cfg.throw_reward_scale * forward_flight_vel * upward_flight_height * in_throw_window
+        # 2. Dynamic passing reward (commented out)
+        # forward_flight_vel = torch.clamp(-self.object_linvel[:, 1], min=0.0, max=2.5)  # Forward speed towards Left Robot (-Y)
+        # above_hands = torch.clamp(self.object_pos[:, 2] - 0.50, min=0.0, max=0.20) / 0.20  # Ball is at or above hand height (z >= 0.50m)
+        # in_throw_window = (self.episode_length_buf < 90).float()  # First 1.5 seconds of episode
+        # rew_throw = self.cfg.throw_reward_scale * forward_flight_vel * above_hands * in_throw_window
 
-        # 3. Anti-curling penalty: left hand must keep fingers open & extended while awaiting incoming ball
-        left_finger_pos = self.left_hand_dof_pos[:, self.actuated_dof_indices[2:]]  # 18 finger joints
-        finger_curl = torch.clamp(left_finger_pos - 0.2, min=0.0)  # Positive flexion beyond 0.2 rad
-        mean_curl = torch.mean(finger_curl, dim=-1)
-        awaiting_ball = (goal_dist > 0.18).float()  # Only penalized when ball is still far
-        rew_open_hand = -self.cfg.curl_penalty_scale * mean_curl * awaiting_ball
+        # 3. Ready-pose reward (Phase 1): left hand must keep fingers wide open while awaiting ball (flexion <= 0.15 rad)
+        finger_flexion = self.left_hand_dof_pos[:, self.finger_flexion_dof_indices]  # (num_envs, 5) main flexion DOFs
+        curled_penalty = torch.clamp(finger_flexion - 0.15, min=0.0)  # Penalizes any flexion beyond open 0.15 rad
+        mean_curled_penalty = torch.mean(curled_penalty, dim=-1)
+        awaiting_ball = (goal_dist > 0.18).float()  # Only penalized while ball is still in flight
+        rew_open_hand = -self.cfg.curl_penalty_scale * mean_curled_penalty * awaiting_ball
 
-        # 4. Tactile catching reward: bonus when left hand fingertips make active contact with ball near target
+        # 4. Tactile catch reward (Phase 2):
+        # Contact sensor strictly filters collisions with the ball (/World/envs/env_.*/object),
+        # so any force > 0.5 N is physically guaranteed to be genuine ball contact.
         left_force_mag = torch.norm(self.left_fingertip_forces, dim=-1)  # (num_envs, 5)
-        left_in_contact = (left_force_mag > 0.5).float()  # Contact threshold > 0.5 N
-        num_left_contacts = torch.sum(left_in_contact, dim=-1)
-        near_goal = (goal_dist < 0.12).float()  # Strict proximity to prevent palm self-collision cheat
+        ball_contacts = (left_force_mag > 0.5).float()  # 1.0 if fingertip touches ball, 0.0 otherwise
+        num_left_contacts = torch.sum(ball_contacts, dim=-1)  # 0 to 5 fingertips grasping the ball
+        near_goal = (goal_dist < 0.12).float()
         rew_catch = self.cfg.contact_reward_scale * num_left_contacts * near_goal
 
-        total_reward = rew_dist + rew_throw + rew_open_hand + rew_catch
+        total_reward = rew_dist + rew_open_hand + rew_catch
 
         # periodic terminal progress log (every 100 steps)
         self.step_counter += 1
@@ -302,7 +308,7 @@ class ShadowHandOverEnv(DirectMARLEnv):
             self.extras["log"] = dict()
         self.extras["log"]["dist_reward"] = rew_dist.mean()
         self.extras["log"]["dist_goal"] = goal_dist.mean()
-        self.extras["log"]["rew_throw"] = rew_throw.mean()
+        # self.extras["log"]["rew_throw"] = rew_throw.mean()
         self.extras["log"]["rew_open_hand"] = rew_open_hand.mean()
         self.extras["log"]["rew_catch"] = rew_catch.mean()
         self.extras["log"]["num_contacts"] = num_left_contacts.mean()
