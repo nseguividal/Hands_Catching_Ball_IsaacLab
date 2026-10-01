@@ -264,11 +264,10 @@ class ShadowHandOverEnv(DirectMARLEnv):
         goal_dist = torch.norm(self.object_pos - self.goal_pos, p=2, dim=-1)
         rew_dist = 2 * torch.exp(-self.cfg.dist_reward_scale * goal_dist)
 
-        # 2. Dynamic passing reward (commented out)
-        # forward_flight_vel = torch.clamp(-self.object_linvel[:, 1], min=0.0, max=2.5)  # Forward speed towards Left Robot (-Y)
-        # above_hands = torch.clamp(self.object_pos[:, 2] - 0.50, min=0.0, max=0.20) / 0.20  # Ball is at or above hand height (z >= 0.50m)
-        # in_throw_window = (self.episode_length_buf < 90).float()  # First 1.5 seconds of episode
-        # rew_throw = self.cfg.throw_reward_scale * forward_flight_vel * above_hands * in_throw_window
+        # 2. Forward pass progression reward: smoothly rewards propelling the ball across the gap (-Y) towards left hand
+        forward_progress = torch.clamp(-0.39 - self.object_pos[:, 1], min=0.0, max=0.27) / 0.27  # 0.0 at right hand -> 1.0 at left hand
+        in_air = (self.object_pos[:, 2] >= 0.45).float()  # Must stay above drop/table level
+        rew_pass = self.cfg.pass_reward_scale * forward_progress * in_air
 
         # 3. Ready-pose reward (Phase 1): left hand must keep fingers wide open while awaiting ball (flexion <= 0.15 rad)
         finger_flexion = self.left_hand_dof_pos[:, self.finger_flexion_dof_indices]  # (num_envs, 5) main flexion DOFs
@@ -286,7 +285,7 @@ class ShadowHandOverEnv(DirectMARLEnv):
         near_goal = (goal_dist < 0.12).float()
         rew_catch = self.cfg.contact_reward_scale * num_left_contacts * near_goal
 
-        total_reward = rew_dist + rew_open_hand + rew_catch
+        total_reward = rew_dist + rew_pass + rew_open_hand + rew_catch
 
         # periodic terminal progress log (every 100 steps)
         self.step_counter += 1
@@ -308,7 +307,7 @@ class ShadowHandOverEnv(DirectMARLEnv):
             self.extras["log"] = dict()
         self.extras["log"]["dist_reward"] = rew_dist.mean()
         self.extras["log"]["dist_goal"] = goal_dist.mean()
-        # self.extras["log"]["rew_throw"] = rew_throw.mean()
+        self.extras["log"]["rew_pass"] = rew_pass.mean()
         self.extras["log"]["rew_open_hand"] = rew_open_hand.mean()
         self.extras["log"]["rew_catch"] = rew_catch.mean()
         self.extras["log"]["num_contacts"] = num_left_contacts.mean()

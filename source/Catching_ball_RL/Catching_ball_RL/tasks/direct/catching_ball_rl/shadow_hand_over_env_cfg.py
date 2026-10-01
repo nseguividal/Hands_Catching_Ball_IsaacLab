@@ -33,7 +33,7 @@ class EventCfg:
             "asset_cfg": SceneEntityCfg("right_hand"),
             "static_friction_range": (0.7, 1.3),
             "dynamic_friction_range": (1.0, 1.0),
-            "restitution_range": (1.0, 1.0),
+            "restitution_range": (0.0, 0.2),
             "num_buckets": 250,
         },
     )
@@ -83,7 +83,7 @@ class EventCfg:
             "asset_cfg": SceneEntityCfg("left_hand"),
             "static_friction_range": (0.7, 1.3),
             "dynamic_friction_range": (1.0, 1.0),
-            "restitution_range": (1.0, 1.0),
+            "restitution_range": (0.0, 0.2),
             "num_buckets": 250,
         },
     )
@@ -133,7 +133,7 @@ class EventCfg:
             "asset_cfg": SceneEntityCfg("object"),
             "static_friction_range": (0.7, 1.3),
             "dynamic_friction_range": (1.0, 1.0),
-            "restitution_range": (0.6, 0.7),
+            "restitution_range": (0.1, 0.25),
             "num_buckets": 250,
         },
     )
@@ -312,7 +312,7 @@ class ShadowHandOverEnvCfg(DirectMARLEnvCfg):
         spawn=sim_utils.SphereCfg(
             radius=0.0335,
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.8, 1.0, 0.0)),
-            physics_material=sim_utils.RigidBodyMaterialCfg(static_friction=0.7),
+            physics_material=sim_utils.RigidBodyMaterialCfg(static_friction=0.7, dynamic_friction=0.7, restitution=0.15),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 kinematic_enabled=False,
                 disable_gravity=False,
@@ -321,7 +321,7 @@ class ShadowHandOverEnvCfg(DirectMARLEnvCfg):
                 solver_velocity_iteration_count=0,
                 sleep_threshold=0.005,
                 stabilization_threshold=0.0025,
-                max_depenetration_velocity=15.0,
+                max_depenetration_velocity=100.0,
             ),
             collision_props=sim_utils.CollisionPropertiesCfg(),
             mass_props=sim_utils.MassPropertiesCfg(density=500.0),
@@ -354,5 +354,6 @@ class ShadowHandOverEnvCfg(DirectMARLEnvCfg):
     # reward-related scales
     dist_reward_scale = 20.0
     contact_reward_scale = 0.4  # 5 fingertips * 0.4 = 2.0 max bonus (balanced 50/50 with dist_reward)
+    pass_reward_scale = 3.0  # Linear progression reward as ball travels towards left hand
     throw_reward_scale = 2.0
     curl_penalty_scale = 0.5
