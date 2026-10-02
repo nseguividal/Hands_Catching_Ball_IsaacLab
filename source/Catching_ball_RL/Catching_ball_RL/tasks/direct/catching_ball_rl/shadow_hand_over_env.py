@@ -86,6 +86,9 @@ class ShadowHandOverEnv(DirectMARLEnv):
         # step counter for training logs
         self.step_counter = 0
 
+        # consecutive hold steps counter for sustained catch reward
+        self.hold_steps = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+
     def _setup_scene(self):
         # add hand, in-hand object, and goal object
         self.right_hand = Articulation(self.cfg.right_robot_cfg)
@@ -260,40 +263,44 @@ class ShadowHandOverEnv(DirectMARLEnv):
         return states
 
     def _get_rewards(self) -> dict[str, torch.Tensor]:
-        # 1. Goal distance reward (Max +3.0 points)
+        # 1. Goal distance reward
         goal_dist = torch.norm(self.object_pos - self.goal_pos, p=2, dim=-1)
-        rew_dist = 3.0 * torch.exp(-self.cfg.dist_reward_scale * goal_dist)
+        rew_dist = 2.0 * torch.exp(-self.cfg.dist_reward_scale * goal_dist)
 
-        # 2. Forward passing & launch reward:
-        # (a) Launch impulse: encourages right hand to actively accelerate the ball forward (-Y) during the first 3.0s (Max +1.0 point)
-        forward_flight_vel = torch.clamp(-self.object_linvel[:, 1] / 2.0, min=0.0, max=1.0)
-        in_launch_window = (self.episode_length_buf < 180).float()  # First 3.0 seconds (at 60 Hz)
-        rew_launch = self.cfg.launch_reward_scale * forward_flight_vel * in_launch_window
+        # 2. Left hand ready stance (Zone A: ball approaching, dist > 12cm)
+        # Prevents premature finger curling while awaiting incoming ball
+        finger_flexion = self.left_hand_dof_pos[:, self.finger_flexion_dof_indices]  # (num_envs, 5)
+        premature_curl = torch.clamp(finger_flexion - 0.20, min=0.0)  # Penalizes curling beyond open 0.20 rad
+        awaiting_ball = (goal_dist > 0.12).float()
+        rew_open_hand = -0.5 * torch.mean(premature_curl, dim=-1) * awaiting_ball
 
-        # (b) Continuous gap progression: rewards the ball for traveling across the gap towards left hand
-        forward_progress = torch.clamp(-0.39 - self.object_pos[:, 1], min=0.0, max=0.27) / 0.27  # 0.0 at right hand -> 1.0 at left hand
-        in_air = (self.object_pos[:, 2] >= 0.45).float()  # Must stay above drop/table level
-        rew_pass = self.cfg.pass_reward_scale * forward_progress * in_air
-
-        # 3. Ready-pose reward (Phase 1): actively rewards left hand for holding open ready stance while awaiting incoming ball
-        finger_flexion = self.left_hand_dof_pos[:, self.finger_flexion_dof_indices]  # (num_envs, 5) main flexion DOFs
-        openness = torch.clamp(1.0 - (finger_flexion / 0.30), min=0.0, max=1.0)  # 1.0 when open, drops to 0.0 if curled > 0.30 rad
-        mean_openness = torch.mean(openness, dim=-1)
-        awaiting_ball = (goal_dist > 0.18).float()  # Active while ball is still in flight
-        rew_ready = self.cfg.ready_reward_scale * mean_openness * awaiting_ball
-
-        # 4. Tactile catch reward (Phase 2):
-        # Strict dual-check: (1) Contact force > 0.5 N AND (2) Fingertip is within 6cm of ball center
+        # 3. Tactile catching & sustained hold reward (Zone B: ball inside hand, dist <= 12cm)
         left_force_mag = torch.norm(self.left_fingertip_forces, dim=-1)  # (num_envs, 5)
         dist_fingertip_ball = torch.norm(self.left_fingertip_pos - self.object_pos.unsqueeze(1), dim=-1)  # (num_envs, 5)
-        near_ball = (dist_fingertip_ball < 0.060)  # Within 6cm of ball center (ball radius = 3.35cm)
+        near_ball = (dist_fingertip_ball < 0.052)  # Within 5.2cm of ball center (touching ball surface, radius 3.35cm)
 
-        ball_contacts = ((left_force_mag > 0.5) & near_ball).float()  # 1.0 ONLY if fingertip touches the ball
-        num_left_contacts = torch.sum(ball_contacts, dim=-1)  # 0 to 5 fingertips grasping the ball
-        near_goal = (goal_dist < 0.12).float()
-        rew_catch = self.cfg.contact_reward_scale * num_left_contacts * near_goal
+        # Anti-cheat check: finger must be curved in a natural grasp window [0.20, 1.15 rad]
+        # Rejects fingers touching each other while straight (< 0.20) or clenched into palm (> 1.15)
+        finger_in_grasp_window = (finger_flexion >= 0.20) & (finger_flexion <= 1.15)  # (num_envs, 5)
 
-        total_reward = rew_dist + rew_launch + rew_pass + rew_ready + rew_catch
+        # Sensitive light touch (> 0.05 N) on ball while in natural grasp
+        valid_ball_contact = ((left_force_mag > 0.05) & near_ball & finger_in_grasp_window).float()
+        num_left_contacts = torch.sum(valid_ball_contact, dim=-1)
+        near_goal = (goal_dist <= 0.12).float()
+
+        # Track consecutive holding steps (requires at least 2 fingers touching the ball near target)
+        is_holding = (num_left_contacts >= 2) & (goal_dist <= 0.12)
+        self.hold_steps = torch.where(is_holding, self.hold_steps + 1.0, torch.zeros_like(self.hold_steps))
+
+        # Sustained hold progression (120 steps = 2.0 seconds at 60 Hz)
+        hold_progress = torch.clamp(self.hold_steps / 120.0, min=0.0, max=1.0)
+
+        # Immediate touch bonus + sustained hold reward (ramps up to +2.0 over 2 seconds)
+        rew_touch = self.cfg.contact_reward_scale * num_left_contacts * near_goal
+        rew_hold = 2.0 * hold_progress * near_goal
+        rew_catch = rew_touch + rew_hold
+
+        total_reward = rew_dist + rew_open_hand + rew_catch
 
         # periodic terminal progress log (every 100 steps)
         self.step_counter += 1
@@ -302,11 +309,13 @@ class ShadowHandOverEnv(DirectMARLEnv):
             min_dist = goal_dist.min().item()
             mean_rew = total_reward.mean().item()
             mean_contacts = num_left_contacts.mean().item()
+            mean_hold_s = (self.hold_steps / 60.0).mean().item()
             print(
                 f"[TRAIN PROGRESS | Step {self.step_counter:6d}] "
                 f"Mean Goal Dist: {mean_dist:.4f} m | "
                 f"Best Env Dist: {min_dist:.4f} m | "
                 f"Catch Contacts: {mean_contacts:.2f}/5 | "
+                f"Hold Time: {mean_hold_s:.2f}s | "
                 f"Mean Reward: {mean_rew:.3f}"
             )
 
@@ -315,10 +324,10 @@ class ShadowHandOverEnv(DirectMARLEnv):
             self.extras["log"] = dict()
         self.extras["log"]["dist_reward"] = rew_dist.mean()
         self.extras["log"]["dist_goal"] = goal_dist.mean()
-        self.extras["log"]["rew_launch"] = rew_launch.mean()
-        self.extras["log"]["rew_pass"] = rew_pass.mean()
-        self.extras["log"]["rew_ready"] = rew_ready.mean()
+        self.extras["log"]["rew_open_hand"] = rew_open_hand.mean()
         self.extras["log"]["rew_catch"] = rew_catch.mean()
+        self.extras["log"]["rew_hold"] = rew_hold.mean()
+        self.extras["log"]["hold_time_s"] = (self.hold_steps / 60.0).mean()
         self.extras["log"]["num_contacts"] = num_left_contacts.mean()
 
         return {"right_hand": total_reward, "left_hand": total_reward}
@@ -340,6 +349,9 @@ class ShadowHandOverEnv(DirectMARLEnv):
             env_ids = self.right_hand._ALL_INDICES
         # reset articulation and rigid body attributes
         super()._reset_idx(env_ids)
+
+        # reset consecutive hold duration
+        self.hold_steps[env_ids] = 0.0
 
         # reset goals
         self._reset_target_pose(env_ids)
