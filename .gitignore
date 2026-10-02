@@ -76,3 +76,23 @@ tests/
 # TacSL sensor
 **/tactile_record/*
 **/gelsight_r15_data/*
+
+# Checkpoints and Trained Model Weights
+checkpoints/
+**/checkpoints/*
+**/*.pth
+**/*.pt
+**/*.onnx
+
+# Datasets and Archives
+/datasets/
+**/*.h5
+**/*.hdf5
+**/*.tar.gz
+**/*.zip
+
+# Media Renders & Videos
+*.mp4
+*.gif
+*.avi
+
