@@ -31,9 +31,9 @@ class EventCfg:
         min_step_count_between_reset=720,
         params={
             "asset_cfg": SceneEntityCfg("right_hand"),
-            "static_friction_range": (0.7, 1.3),
-            "dynamic_friction_range": (1.0, 1.0),
-            "restitution_range": (0.0, 0.2),
+            "static_friction_range": (0.4, 0.7),
+            "dynamic_friction_range": (0.3, 0.6),
+            "restitution_range": (0.1, 0.3),
             "num_buckets": 250,
         },
     )
@@ -81,9 +81,9 @@ class EventCfg:
         min_step_count_between_reset=720,
         params={
             "asset_cfg": SceneEntityCfg("left_hand"),
-            "static_friction_range": (0.7, 1.3),
-            "dynamic_friction_range": (1.0, 1.0),
-            "restitution_range": (0.0, 0.2),
+            "static_friction_range": (0.4, 0.7),
+            "dynamic_friction_range": (0.3, 0.6),
+            "restitution_range": (0.1, 0.3),
             "num_buckets": 250,
         },
     )
@@ -131,9 +131,9 @@ class EventCfg:
         mode="reset",
         params={
             "asset_cfg": SceneEntityCfg("object"),
-            "static_friction_range": (0.7, 1.3),
-            "dynamic_friction_range": (1.0, 1.0),
-            "restitution_range": (0.1, 0.25),
+            "static_friction_range": (0.3, 0.6),
+            "dynamic_friction_range": (0.3, 0.5),
+            "restitution_range": (0.3, 0.5),
             "num_buckets": 250,
         },
     )
@@ -181,8 +181,8 @@ class ShadowHandOverEnvCfg(DirectMARLEnvCfg):
         dt=1 / 120,
         render_interval=decimation,
         physics_material=RigidBodyMaterialCfg(
-            static_friction=1.0,
-            dynamic_friction=1.0,
+            static_friction=0.5,
+            dynamic_friction=0.5,
         ),
         physx=PhysxCfg(
             bounce_threshold_velocity=0.2,
@@ -237,16 +237,14 @@ class ShadowHandOverEnvCfg(DirectMARLEnvCfg):
         "robot0_thdistal",
     ]
 
-    # contact sensors (detect contact forces on fingertips ONLY when contacting the ball)
+    # contact sensors (detect contact forces on fingertips)
     right_contact_sensor_cfg: ContactSensorCfg = ContactSensorCfg(
         prim_path="/World/envs/env_.*/RightRobot/robot0_.*distal",
-        filter_prim_paths_expr=["/World/envs/env_.*/object"],
         update_period=0.0,
         history_length=1,
     )
     left_contact_sensor_cfg: ContactSensorCfg = ContactSensorCfg(
         prim_path="/World/envs/env_.*/LeftRobot/robot0_.*distal",
-        filter_prim_paths_expr=["/World/envs/env_.*/object"],
         update_period=0.0,
         history_length=1,
     )
@@ -312,7 +310,7 @@ class ShadowHandOverEnvCfg(DirectMARLEnvCfg):
         spawn=sim_utils.SphereCfg(
             radius=0.0335,
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.8, 1.0, 0.0)),
-            physics_material=sim_utils.RigidBodyMaterialCfg(static_friction=0.7, dynamic_friction=0.7, restitution=0.15),
+            physics_material=sim_utils.RigidBodyMaterialCfg(static_friction=0.4, dynamic_friction=0.4, restitution=0.40),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 kinematic_enabled=False,
                 disable_gravity=False,
@@ -353,7 +351,7 @@ class ShadowHandOverEnvCfg(DirectMARLEnvCfg):
     act_moving_average = 1.0
     # reward-related scales
     dist_reward_scale = 20.0
-    contact_reward_scale = 0.4  # 5 fingertips * 0.4 = 2.0 max bonus (balanced 50/50 with dist_reward)
+    contact_reward_scale = 0.4  # 5 fingertips * 0.4 = 2.0 max points
     pass_reward_scale = 3.0  # Linear progression reward as ball travels towards left hand
-    throw_reward_scale = 2.0
-    curl_penalty_scale = 0.5
+    launch_reward_scale = 1.0  # Max +1.0 point for early forward throw push
+    ready_reward_scale = 1.0  # Max +1.0 point for holding open ready stance during ball flight

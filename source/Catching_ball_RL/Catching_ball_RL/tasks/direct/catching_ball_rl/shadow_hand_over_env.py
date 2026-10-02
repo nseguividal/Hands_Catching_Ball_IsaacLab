@@ -260,32 +260,40 @@ class ShadowHandOverEnv(DirectMARLEnv):
         return states
 
     def _get_rewards(self) -> dict[str, torch.Tensor]:
-        # 1. Goal distance reward
+        # 1. Goal distance reward (Max +3.0 points)
         goal_dist = torch.norm(self.object_pos - self.goal_pos, p=2, dim=-1)
-        rew_dist = 2 * torch.exp(-self.cfg.dist_reward_scale * goal_dist)
+        rew_dist = 3.0 * torch.exp(-self.cfg.dist_reward_scale * goal_dist)
 
-        # 2. Forward pass progression reward: smoothly rewards propelling the ball across the gap (-Y) towards left hand
+        # 2. Forward passing & launch reward:
+        # (a) Launch impulse: encourages right hand to actively accelerate the ball forward (-Y) during the first 3.0s (Max +1.0 point)
+        forward_flight_vel = torch.clamp(-self.object_linvel[:, 1] / 2.0, min=0.0, max=1.0)
+        in_launch_window = (self.episode_length_buf < 180).float()  # First 3.0 seconds (at 60 Hz)
+        rew_launch = self.cfg.launch_reward_scale * forward_flight_vel * in_launch_window
+
+        # (b) Continuous gap progression: rewards the ball for traveling across the gap towards left hand
         forward_progress = torch.clamp(-0.39 - self.object_pos[:, 1], min=0.0, max=0.27) / 0.27  # 0.0 at right hand -> 1.0 at left hand
         in_air = (self.object_pos[:, 2] >= 0.45).float()  # Must stay above drop/table level
         rew_pass = self.cfg.pass_reward_scale * forward_progress * in_air
 
-        # 3. Ready-pose reward (Phase 1): left hand must keep fingers wide open while awaiting ball (flexion <= 0.15 rad)
+        # 3. Ready-pose reward (Phase 1): actively rewards left hand for holding open ready stance while awaiting incoming ball
         finger_flexion = self.left_hand_dof_pos[:, self.finger_flexion_dof_indices]  # (num_envs, 5) main flexion DOFs
-        curled_penalty = torch.clamp(finger_flexion - 0.15, min=0.0)  # Penalizes any flexion beyond open 0.15 rad
-        mean_curled_penalty = torch.mean(curled_penalty, dim=-1)
-        awaiting_ball = (goal_dist > 0.18).float()  # Only penalized while ball is still in flight
-        rew_open_hand = -self.cfg.curl_penalty_scale * mean_curled_penalty * awaiting_ball
+        openness = torch.clamp(1.0 - (finger_flexion / 0.30), min=0.0, max=1.0)  # 1.0 when open, drops to 0.0 if curled > 0.30 rad
+        mean_openness = torch.mean(openness, dim=-1)
+        awaiting_ball = (goal_dist > 0.18).float()  # Active while ball is still in flight
+        rew_ready = self.cfg.ready_reward_scale * mean_openness * awaiting_ball
 
         # 4. Tactile catch reward (Phase 2):
-        # Contact sensor strictly filters collisions with the ball (/World/envs/env_.*/object),
-        # so any force > 0.5 N is physically guaranteed to be genuine ball contact.
+        # Strict dual-check: (1) Contact force > 0.5 N AND (2) Fingertip is within 6cm of ball center
         left_force_mag = torch.norm(self.left_fingertip_forces, dim=-1)  # (num_envs, 5)
-        ball_contacts = (left_force_mag > 0.5).float()  # 1.0 if fingertip touches ball, 0.0 otherwise
+        dist_fingertip_ball = torch.norm(self.left_fingertip_pos - self.object_pos.unsqueeze(1), dim=-1)  # (num_envs, 5)
+        near_ball = (dist_fingertip_ball < 0.060)  # Within 6cm of ball center (ball radius = 3.35cm)
+
+        ball_contacts = ((left_force_mag > 0.5) & near_ball).float()  # 1.0 ONLY if fingertip touches the ball
         num_left_contacts = torch.sum(ball_contacts, dim=-1)  # 0 to 5 fingertips grasping the ball
         near_goal = (goal_dist < 0.12).float()
         rew_catch = self.cfg.contact_reward_scale * num_left_contacts * near_goal
 
-        total_reward = rew_dist + rew_pass + rew_open_hand + rew_catch
+        total_reward = rew_dist + rew_launch + rew_pass + rew_ready + rew_catch
 
         # periodic terminal progress log (every 100 steps)
         self.step_counter += 1
@@ -307,8 +315,9 @@ class ShadowHandOverEnv(DirectMARLEnv):
             self.extras["log"] = dict()
         self.extras["log"]["dist_reward"] = rew_dist.mean()
         self.extras["log"]["dist_goal"] = goal_dist.mean()
+        self.extras["log"]["rew_launch"] = rew_launch.mean()
         self.extras["log"]["rew_pass"] = rew_pass.mean()
-        self.extras["log"]["rew_open_hand"] = rew_open_hand.mean()
+        self.extras["log"]["rew_ready"] = rew_ready.mean()
         self.extras["log"]["rew_catch"] = rew_catch.mean()
         self.extras["log"]["num_contacts"] = num_left_contacts.mean()
 
